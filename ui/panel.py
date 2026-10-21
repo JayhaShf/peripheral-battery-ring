@@ -461,6 +461,37 @@ def charging_color(cfg: Optional[Dict[str, Any]]) -> str:
     return val if val.startswith("#") and len(val) in (4, 7) else "#3b82f6"
 
 
+def hex_to_rgb(text: str, fallback: Tuple[int, int, int] = (34, 197, 94)
+               ) -> Tuple[int, int, int]:
+    """``#RRGGBB`` / ``#RGB`` -> (r, g, b)；解析失败返回 fallback。
+
+    本项目零第三方依赖，不 import ui/render.py（那是托盘渲染层，可能未就绪）。
+    """
+    try:
+        s = str(text or "").strip().lstrip("#")
+        if len(s) == 3:
+            s = "".join(ch * 2 for ch in s)
+        if len(s) != 6:
+            return fallback
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except Exception:
+        return fallback
+
+
+def mix_hex(color: str, other: str, t: float,
+            fallback: str = "#3b82f6") -> str:
+    """把两种颜色按比例混合（t=0 取 color，t=1 取 other）。"""
+    try:
+        a = hex_to_rgb(color, hex_to_rgb(fallback))
+        b = hex_to_rgb(other, (255, 255, 255))
+        t = max(0.0, min(1.0, float(t)))
+        return "#%02x%02x%02x" % tuple(
+            max(0, min(255, int(round(a[i] + (b[i] - a[i]) * t))))
+            for i in range(3))
+    except Exception:
+        return fallback
+
+
 def level_color(level: Optional[int], low_warn: int = 20,
                 cfg: Optional[Dict[str, Any]] = None) -> str:
     if level is None:
@@ -548,14 +579,22 @@ def draw_ring(canv: tk.Canvas, cx: float, cy: float, radius: float,
     canv.create_text(cx, cy, text=label, fill=text_color or C["fg"],
                      font=F_NUM(text_pt))
     if charging:
+        bright = mix_hex(charge_hex, "#ffffff", 0.62)
+        glow = mix_hex(charge_hex, "#ffffff", 0.30)
         if sweep:
+            # 亮弧沿环顺时针扫动：相位 0→1 走完一圈（周期由调用方控制）
             head = (phase % 1.0) * 360.0
-            canv.create_arc(*box, start=90 - head - 42, extent=42, style="arc",
-                            outline="#dbeafe", width=max(1, lw - 1))
-        bx, by = cx + radius * 0.66, cy + radius * 0.66
-        pts = [(bx + 0.6, by - 4.6), (bx - 2.6, by + 0.9), (bx - 0.5, by + 0.9),
-               (bx - 1.7, by + 4.9), (bx + 3.0, by - 0.8), (bx + 0.7, by - 0.8)]
-        canv.create_polygon(pts, fill="#dbeafe", outline="")
+            canv.create_arc(*box, start=90 - head - 58, extent=58, style="arc",
+                            outline=glow, width=max(1, lw))
+            canv.create_arc(*box, start=90 - head - 26, extent=26, style="arc",
+                            outline=bright, width=max(1, lw))
+        # 闪电徽标（随圆环半径缩放）
+        u = max(0.55, radius / 25.0)
+        bx, by = cx + radius * 0.70, cy + radius * 0.70
+        pts = [(bx + 0.6 * u, by - 4.6 * u), (bx - 2.6 * u, by + 0.9 * u),
+               (bx - 0.5 * u, by + 0.9 * u), (bx - 1.7 * u, by + 4.9 * u),
+               (bx + 3.0 * u, by - 0.8 * u), (bx + 0.7 * u, by - 0.8 * u)]
+        canv.create_polygon(pts, fill=bright, outline="")
 
 
 # ---------------------------------------------------------------------------
@@ -798,14 +837,21 @@ class Section(tk.Frame):
         self.body = tk.Frame(self, bg=C["bg"])
         self.body.pack(fill="x")
 
-    def row(self, label: str, hint: str = "") -> tk.Frame:
+    def row(self, label: str, hint: str = "",
+            label_var: Optional[tk.StringVar] = None) -> tk.Frame:
         """新增一行；返回右侧容器（左侧已放标签/提示）。"""
         holder = tk.Frame(self.body, bg=C["bg"])
         holder.pack(fill="x", pady=(S(9), S(9)))
         left = tk.Frame(holder, bg=C["bg"])
         left.pack(side="left", fill="x", expand=True)
-        tk.Label(left, text=label, bg=C["bg"], fg=C["fg"], font=F(10),
-                 anchor="w", justify="left", wraplength=S(300)).pack(anchor="w")
+        if label_var is not None:
+            lbl: tk.Label = tk.Label(left, textvariable=label_var, bg=C["bg"],
+                                     fg=C["fg"], font=F(10), anchor="w",
+                                     justify="left", wraplength=S(300))
+        else:
+            lbl = tk.Label(left, text=label, bg=C["bg"], fg=C["fg"], font=F(10),
+                           anchor="w", justify="left", wraplength=S(300))
+        lbl.pack(anchor="w")
         if hint:
             tk.Label(left, text=hint, bg=C["bg"], fg=C["dim"], font=F(9),
                      anchor="w", justify="left", wraplength=S(320)).pack(
@@ -826,6 +872,9 @@ class DeviceCard(tk.Frame):
     """
 
     RING = 58.0
+    ANIM_MS = 350                 # 电量过渡时长（ease-out）
+    TICK_MS = 33                  # 30fps
+    SWEEP_STEP = 0.018            # 每帧相位增量 → 1.9s 一圈
 
     def __init__(self, master: tk.Misc, reading: Any, info: Any,
                  on_refresh: Callable[[str], None],
@@ -846,14 +895,12 @@ class DeviceCard(tk.Frame):
         self._phase = 0.0
         self._anim_level: Optional[float] = None
         self._target_level: Optional[float] = None
+        self._anim_from = 0.0
+        self._anim_t0 = 0.0
         self._charging = False
         self._tooltip = None
-        try:
-            ring_size = float(self.cfg.get("ring_size") or 30)
-        except Exception:
-            ring_size = 30.0
-        self._scale = max(0.8, min(1.25, ring_size / 30.0))
-        self._ring_px = max(int(S(34)), int(S(self.RING * self._scale)))
+        self._scale = self._scale_for(self.cfg)
+        self._ring_px = self._px_for(self._scale)
 
         self.grid_columnconfigure(0, weight=1)
         top = tk.Frame(self, bg=C["card"])
@@ -906,6 +953,37 @@ class DeviceCard(tk.Frame):
         self.update_reading(reading, info, name=name, low_warn=low_warn,
                             animate=False)
 
+    # -- 尺寸 -----------------------------------------------------------
+    @classmethod
+    def _scale_for(cls, cfg: Optional[Dict[str, Any]]) -> float:
+        """ring_size → 缩放系数（0.8~1.25 倍；30 为基准）。"""
+        try:
+            ring_size = float((cfg or {}).get("ring_size") or 30)
+        except Exception:
+            ring_size = 30.0
+        return max(0.8, min(1.25, ring_size / 30.0))
+
+    @classmethod
+    def _px_for(cls, scale: float) -> int:
+        return max(int(S(34)), int(round(S(cls.RING * scale))))
+
+    def apply_cfg(self, cfg: Optional[Dict[str, Any]]) -> None:
+        """配置变化（圆环尺寸 / 颜色 / 动画开关）→ 就地生效，不重建控件。"""
+        self.cfg = dict(cfg or {})
+        scale = self._scale_for(self.cfg)
+        px = self._px_for(scale)
+        if px != self._ring_px or abs(scale - self._scale) > 1e-6:
+            self._scale = scale
+            self._ring_px = px
+            try:
+                self.canvas.configure(width=px, height=px)
+            except Exception:
+                pass
+        if not bool(self.cfg.get("animate", True)):
+            self._stop_anim()
+            self._anim_level = self._target_level
+        self._draw()
+
     # -- 数据更新 -------------------------------------------------------
     def update_reading(self, reading: Any, info: Any, *,
                        name: str = "", low_warn: int = 20,
@@ -930,25 +1008,32 @@ class DeviceCard(tk.Frame):
         else:
             self.lbl_detail.pack_forget()
         self._charging = charging
-        self._target_level = None if level is None else float(level)
-        if not animate or not bool(self.cfg.get("animate", True)):
-            self._anim_level = self._target_level
+        new_target = None if level is None else float(level)
+        self._target_level = new_target
+
+        animated = animate and bool(self.cfg.get("animate", True))
+        # 没有起点（首次 / 之前读不到）→ 直接落到目标值，不做过渡
+        if not animated or self._anim_level is None or new_target is None:
+            self._anim_level = new_target
             self._draw()
-            if charging:
-                self._start_anim()
-            else:
-                self._stop_anim()
-            return
-        if self._anim_level is None or level is None:
-            self._anim_level = self._target_level
+        elif abs(float(self._anim_level) - new_target) > 0.4:
+            # 有变化：从当前显示值平滑过渡到新值
+            self._anim_from = float(self._anim_level)
+            self._anim_t0 = time.time()
+        else:
+            self._anim_level = new_target
             self._draw()
-        if charging or (self._anim_level is not None and
-                        self._target_level is not None and
-                        abs(self._anim_level - self._target_level) > 0.4):
+
+        # 只有「充电扫光」或「数值过渡」进行中才启动定时器；静止时 0 个。
+        if charging or self._animating():
             self._start_anim()
         else:
-            self._draw()
             self._stop_anim()
+
+    def _animating(self) -> bool:
+        if self._anim_level is None or self._target_level is None:
+            return False
+        return abs(float(self._anim_level) - float(self._target_level)) > 0.4
 
     # -- 绘制 -----------------------------------------------------------
     def _draw(self) -> None:
@@ -984,18 +1069,25 @@ class DeviceCard(tk.Frame):
         self._job = None
         moving = False
         if self._anim_level is not None and self._target_level is not None:
-            diff = self._target_level - self._anim_level
-            if abs(diff) <= 0.4:
-                self._anim_level = self._target_level
-            else:
-                self._anim_level += diff * 0.28
-                moving = True
+            target = float(self._target_level)
+            if abs(float(self._anim_level) - target) > 0.4:
+                # ease-out：进度 p 用 1-(1-p)^3，350ms 内走完
+                elapsed = max(0.0, time.time() - self._anim_t0)
+                p = min(1.0, elapsed / (self.ANIM_MS / 1000.0))
+                eased = 1.0 - (1.0 - p) ** 3
+                self._anim_level = self._anim_from + (target - self._anim_from) * eased
+                moving = p < 1.0
+            if abs(float(self._anim_level) - target) <= 0.4:
+                self._anim_level = target
         if self._charging:
-            self._phase = (self._phase + 0.018) % 1.0
+            # 扫光相位按帧推进（33ms × 57.6 帧 ≈ 1.9s 一圈）
+            self._phase = (self._phase + self.SWEEP_STEP) % 1.0
             moving = True
         self._draw()
         if moving:
-            self._job = self.after(33, self._tick)
+            self._job = self.after(self.TICK_MS, self._tick)
+        else:
+            self._phase = 0.0
 
     def destroy(self) -> None:
         self._hide_tooltip()
@@ -1180,8 +1272,13 @@ class PanelApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._setup_style()
         self._build_ui()             # 先建界面，才能按内容算初始高度
-        self._loading = False
-        self._load_into_ui()
+        # _loading 必须覆盖 _load_into_ui()：否则每个 var.set() 都会触发
+        # _on_discrete_change → config.save + broadcast_reload（启动时连写好几次、
+        # 常驻程序被反复叫醒重绘 → 看起来就是"开窗闪一下"）。
+        try:
+            self._load_into_ui()
+        finally:
+            self._loading = False
         self._apply_geometry()
         self.select_tab(tab)
 
@@ -1576,28 +1673,24 @@ class PanelApp:
         self.sec_legend.pack(fill="x")
         legend = tk.Frame(self.sec_legend.body, bg=C["bg"])
         legend.pack(fill="x", pady=(S(10), S(10)))
-        low_warn_cfg = int(self.cfg.get("low_battery_warn", 20) or 20)
-        charge_hex = charging_color(self.cfg)
-        items = [
-            (62, "≥60%", "正常", level_color(62, low_warn_cfg, self.cfg), False),
-            (42, "30–59%", "偏低", level_color(42, low_warn_cfg, self.cfg), False),
-            (12, "<20%", "低电量", level_color(12, low_warn_cfg, self.cfg), False),
-            (55, "充电中", "蓝色 + 扫光", charge_hex, True),
-        ]
-        for level, title, sub, color, charging in items:
+        self._legend_cells: List[dict] = []
+        for _k in range(4):
             cell = tk.Frame(legend, bg=C["bg"])
             cell.pack(side="left", fill="x", expand=True)
             cv = tk.Canvas(cell, width=int(S(34)), height=int(S(34)), bg=C["bg"],
                            highlightthickness=0, bd=0)
             cv.pack(side="left")
-            draw_ring(cv, S(17), S(17), S(13.5), S(3.4), level, color=color,
-                      charging=charging, text_pt=9, cfg=self.cfg)
             txt = tk.Frame(cell, bg=C["bg"])
             txt.pack(side="left", padx=(S(6), 0))
-            tk.Label(txt, text=title, bg=C["bg"], fg=C["fg"], font=F(9.5, True),
-                     anchor="w").pack(anchor="w")
-            tk.Label(txt, text=sub, bg=C["bg"], fg=C["muted"], font=F(9),
-                     anchor="w").pack(anchor="w")
+            lbl_title = tk.Label(txt, text="", bg=C["bg"], fg=C["fg"],
+                                 font=F(9.5, True), anchor="w")
+            lbl_title.pack(anchor="w")
+            lbl_sub = tk.Label(txt, text="", bg=C["bg"], fg=C["muted"],
+                               font=F(9), anchor="w")
+            lbl_sub.pack(anchor="w")
+            self._legend_cells.append({"canvas": cv, "title": lbl_title,
+                                       "sub": lbl_sub})
+        self._draw_legend()
 
         # ---- 底栏 ----
         bar = tk.Frame(footer, bg=C["bg"])
@@ -1674,8 +1767,19 @@ class PanelApp:
                         self.var_color_high)
         self._color_row(sec_color, "中电量 ≥", self.var_min_mid,
                         self.var_color_mid)
-        self._color_row(sec_color, "低电量 <", None, self.var_color_low)
+        # 第三档阈值 = 中电量的 min（< 它就算低电量）
+        self.var_low_label = tk.StringVar(value="低电量 < 20%")
+        self._sync_low_label()
+        self.var_min_mid.trace_add("write", lambda *_: self._sync_low_label())
+        self._color_row(sec_color, "", None, self.var_color_low,
+                        label_var=self.var_low_label)
         self._color_row(sec_color, "充电中", None, self.var_color_charging)
+        tk.Label(sec_color.body,
+                 text="点颜色块用系统取色器选色；保存后主界面图例与设备圆环"
+                      "立即生效，充电时圆环用「充电中」颜色。",
+                 bg=C["bg"], fg=C["dim"], font=F(9), anchor="w",
+                 justify="left", wraplength=S(460)).pack(
+            fill="x", padx=(S(2), S(2)), pady=(0, S(6)))
 
         # ---- 通知区域 ----
         sec2 = Section(body, "通知区域")
@@ -1756,7 +1860,6 @@ class PanelApp:
             self.root.after(80, self._draw_size_preview)
         except Exception:
             pass
-
     # ==================================================================
     # 关于页
     # ==================================================================
@@ -1829,23 +1932,70 @@ class PanelApp:
     # 控件工厂
     # ==================================================================
     # -- 颜色 / 预览辅助 -------------------------------------------------
+    def _preview_level(self, cfg: Optional[Dict[str, Any]] = None) -> int:
+        """预览圆环显示的电量：取最高档阈值，颜色即最高档颜色。"""
+        levels = color_levels(cfg if cfg is not None else self.cfg)
+        try:
+            return max(1, min(100, int(levels[0][0])))
+        except Exception:
+            return 60
+
     def _draw_size_preview(self) -> None:
+        """「圆环尺寸」行右侧的实时预览：直径随下拉选择变化（40~64px）。"""
         try:
             cv = getattr(self, "size_preview", None)
             if cv is None:
                 return
             cv.delete("all")
-            px = int(S(44))
-            radius = px / 2.0 - S(4)
-            level = 62
             size = int(self._value_for(self.ring_choices,
                                        self.var_ring.get(), 30))
-            cv.configure(width=px, height=px)
-            draw_ring(cv, px / 2.0, px / 2.0, radius, S(5), level,
+            scale = max(0.8, min(1.25, size / 30.0))
+            # 预览直径 40~64 逻辑 px，与设备卡片同比例
+            diameter = int(round(48 * scale))
+            diameter = max(S(40), min(S(64), int(S(diameter))))
+            cv.configure(width=diameter, height=diameter)
+            radius = diameter / 2.0 - S(4)
+            thick = max(2, int(S(4.6 * scale)))
+            level = self._preview_level()
+            draw_ring(cv, diameter / 2.0, diameter / 2.0, radius, thick, level,
                       color=level_color(level, cfg=self.cfg),
                       text_pt=10, cfg=self.cfg)
         except Exception:
             pass
+
+    def _draw_legend(self) -> None:
+        """设备页图例：颜色/文案跟随 color_levels 与 charging_color。"""
+        cells = getattr(self, "_legend_cells", None)
+        if not cells:
+            return
+        low_warn = int(self.cfg.get("low_battery_warn", 20) or 20)
+        levels = color_levels(self.cfg)
+        try:
+            hi = int(levels[0][0])
+            mid = int(levels[1][0]) if len(levels) > 1 else 20
+        except Exception:
+            hi, mid = 60, 20
+        hi = max(1, min(100, hi))
+        mid = max(0, min(hi - 1 if hi > 1 else 0, mid))
+        items = [
+            (max(1, min(100, hi)), f"≥{hi}%", "正常",
+             level_color(hi, low_warn, self.cfg), False),
+            (max(0, mid), f"{mid}–{hi - 1}%", "偏低",
+             level_color(max(0, mid), low_warn, self.cfg), False),
+            (max(0, mid - 1), f"<{mid}%", "低电量",
+             level_color(max(0, mid - 1), low_warn, self.cfg), False),
+            (55, "充电中", "蓝色 + 扫光", charging_color(self.cfg), True),
+        ]
+        for cell, (lv, title, sub, color, charging) in zip(cells, items):
+            try:
+                cv = cell["canvas"]
+                cv.delete("all")
+                draw_ring(cv, S(17), S(17), S(13.5), S(3.4), lv, color=color,
+                          charging=charging, text_pt=9, cfg=self.cfg)
+                cell["title"].configure(text=title)
+                cell["sub"].configure(text=sub)
+            except Exception:
+                continue
 
     def _pick_color(self, var: tk.StringVar, button: tk.Widget) -> None:
         try:
@@ -1862,10 +2012,25 @@ class PanelApp:
         except Exception:
             pass
 
+    def _sync_low_label(self) -> None:
+        """「低电量 < N%」的 N 跟随中电量阈值。"""
+        try:
+            mid = max(1, min(100, int(self.var_min_mid.get())))
+        except Exception:
+            mid = 20
+        try:
+            self.var_low_label.set(f"低电量 < {mid}%")
+        except Exception:
+            pass
+
     def _color_row(self, section: "Section", label: str,
                    min_var: Optional[tk.IntVar],
-                   color_var: tk.StringVar) -> tk.Frame:
-        row = section.row(label)
+                   color_var: tk.StringVar,
+                   label_var: Optional[tk.StringVar] = None) -> tk.Frame:
+        if label_var is not None:
+            row = section.row(label, label_var=label_var)
+        else:
+            row = section.row(label)
         btn = tk.Button(row, width=3, relief="flat", bd=0,
                         bg=str(color_var.get()), activebackground=str(color_var.get()),
                         cursor="hand2",
@@ -2017,6 +2182,24 @@ class PanelApp:
             return
         self._apply(explicit=False)
 
+    def _apply_appearance(self) -> None:
+        """颜色 / 圆环尺寸 / 阈值变化后立刻重画（不写盘、不重建控件）。"""
+        if self._loading or self._build_lock:
+            return
+        try:
+            self._draw_size_preview()
+        except Exception:
+            pass
+        try:
+            self._draw_legend()
+        except Exception:
+            pass
+        for card in list(self._cards.values()):
+            try:
+                card.apply_cfg(self.cfg)
+            except Exception:
+                pass
+
     def _save_explicit(self) -> None:
         self._apply(explicit=True)
 
@@ -2044,6 +2227,8 @@ class PanelApp:
         msg_id = broadcast_reload()
         self._reschedule_refresh()
         self._update_subtitle()
+        # 外观类配置（颜色 / 圆环尺寸 / 阈值）→ 就地生效，不重建卡片
+        self._apply_appearance()
         if cfg["refresh_seconds"] != prev_secs:
             self._render_device_cards()
 
@@ -2202,17 +2387,19 @@ class PanelApp:
 
     # ------------------------------------------------------------------
     def _render_device_cards(self) -> None:
-        """刷新设备卡片：集合/顺序不变时原地更新，避免整块重建闪烁。"""
+        """刷新设备卡片：集合/顺序不变时原地更新，避免整块重建闪烁。
+
+        * 设备集合与顺序都没变 → 逐张 ``update_reading()``（不建/不销毁控件）；
+        * 有增删/换序 → 只对变化的卡片做增删，其余复用，最后按顺序重排。
+        """
         aliases = self.cfg.get("device_aliases") or {}
         hidden = set(self.cfg.get("device_hidden") or [])
         low_warn = int(self.cfg.get("low_battery_warn", 20) or 20)
         readings = [r for r in self._readings if r is not None]
         desired = [str(getattr(r, "device_id", "") or "") for r in readings]
-        if not readings:
-            desired = []
 
         if desired and desired == list(self._cards.keys()):
-            # 原地更新
+            # 原地更新：不重建任何控件 → 不闪、不跳、滚动位置不变
             for reading, did in zip(readings, desired):
                 card = self._cards.get(did)
                 if card is None:
@@ -2226,29 +2413,45 @@ class PanelApp:
                     card.var_visible.set(visible)
             return
 
-        # 设备集合变化：重建（只在增删/排序变化时发生）
         yview = None
         try:
             yview = self.page_scroll["设备"].canvas.yview()
         except Exception:
             pass
-        for card in self._cards.values():
-            try:
-                card.destroy()
-            except Exception:
-                pass
-        self._cards = {}
-        for child in self.dev_holder.winfo_children():
-            child.destroy()
 
         if not readings:
+            for card in self._cards.values():
+                try:
+                    card.destroy()
+                except Exception:
+                    pass
+            self._cards = {}
+            for child in self.dev_holder.winfo_children():
+                child.destroy()
             text, color = self._empty_text()
             tk.Label(self.dev_holder, text=text, bg=C["card"], fg=color,
                      font=F(9.5), anchor="w", justify="left", padx=S(14),
                      pady=S(14), wraplength=S(460)).pack(fill="x")
-        else:
-            for reading in readings:
-                did = str(getattr(reading, "device_id", "") or "")
+            return
+
+        # 有设备：先清掉空态占位，再按 device_id 复用/新建卡片
+        for child in self.dev_holder.winfo_children():
+            if not isinstance(child, DeviceCard):
+                child.destroy()
+
+        keep = set(desired)
+        for did in list(self._cards.keys()):
+            if did not in keep:
+                try:
+                    self._cards[did].destroy()
+                except Exception:
+                    pass
+                self._cards.pop(did, None)
+
+        for reading in readings:
+            did = str(getattr(reading, "device_id", "") or "")
+            card = self._cards.get(did)
+            if card is None:
                 card = DeviceCard(
                     self.dev_holder, reading, self._infos.get(did),
                     on_refresh=self._refresh_devices,
@@ -2258,8 +2461,27 @@ class PanelApp:
                     low_warn=low_warn,
                     cfg=self.cfg,
                 )
-                card.pack(fill="x", pady=(0, S(10)))
                 self._cards[did] = card
+            else:
+                card.apply_cfg(self.cfg)
+                card.update_reading(
+                    reading, self._infos.get(did),
+                    name=str(aliases.get(did, "") or ""),
+                    low_warn=low_warn, animate=False)
+
+        # 按期望顺序重排（pack 顺序 = 插入顺序），并让 _cards 的键序与之一致
+        for did in desired:
+            card = self._cards.get(did)
+            if card is None:
+                continue
+            try:
+                card.pack_forget()
+                card.pack(fill="x", pady=(0, S(10)))
+            except Exception:
+                continue
+        self._cards = {did: self._cards[did] for did in desired
+                       if did in self._cards}
+
         if yview:
             try:
                 self.page_scroll["设备"].canvas.yview_moveto(yview[0])
