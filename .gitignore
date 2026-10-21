@@ -1,0 +1,16 @@
+# 开发/参考/临时产物（不属于交付）
+_ref/
+__pycache__/
+*.py[cod]
+*.bmp
+*.tmp
+
+# 本机运行产物（程序会自动生成/迁移）
+config.json
+scripts/python-path.txt
+scripts/install-manifest.json
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
