@@ -21,9 +21,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, MOD_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, TranslateMessage, HICON, HMENU, MSG,
-    WINDOW_EX_STYLE, WNDCLASSEXW, WNDPROC, WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMessageW, IsWindowVisible,
+    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
+    TranslateMessage, HICON, HMENU, MSG, WINDOW_EX_STYLE, WNDCLASSEXW, WNDPROC, WS_OVERLAPPED,
 };
 
 pub const WND_CLASS: windows::core::PCWSTR = w!("PeripheralBatteryRingRsWnd");
@@ -59,6 +59,15 @@ fn sync_tray(app: &mut App) {
 }
 
 fn open_ui() {
+    unsafe {
+        // 已经开着就切到前台，避免点一次开一个窗口
+        if let Ok(existing) = FindWindowW(None, w!("外设电量圆环")) {
+            if IsWindowVisible(existing).as_bool() {
+                let _ = SetForegroundWindow(existing);
+                return;
+            }
+        }
+    }
     let Some(exe) = std::env::current_exe().ok() else { return };
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--ui");
@@ -112,7 +121,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let event = (lparam.0 as u32) & 0xFFFF;
             match event {
                 0x0205 => handle_menu(hwnd),
-                0x0202 | 0x0203 => open_ui(),
+                0x0202 => open_ui(),
                 _ => {}
             }
             LRESULT(0)
@@ -190,7 +199,7 @@ fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             WND_CLASS,
-            w!("外设电量圆环"),
+            w!("PeripheralBatteryRingDaemon"),
             WS_OVERLAPPED,
             0,
             0,

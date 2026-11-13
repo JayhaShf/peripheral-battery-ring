@@ -27,6 +27,7 @@ pub fn render_bgra(size: u32, level: Option<u8>, charging: bool, cfg: &Config) -
         for x in 0..n {
             let mut track_cov = 0.0f32;
             let mut prog_cov = 0.0f32;
+            let mut shadow_cov = 0.0f32;
             for sy in 0..ss {
                 for sx in 0..ss {
                     let fx = x as f32 + (sx as f32 + 0.5) / ss as f32;
@@ -34,6 +35,13 @@ pub fn render_bgra(size: u32, level: Option<u8>, charging: bool, cfg: &Config) -
                     let dx = fx - cx;
                     let dy = fy - cy;
                     let dist = (dx * dx + dy * dy).sqrt();
+                    // 右下偏移的柔和阴影
+                    let sdx = fx - (cx + 0.9);
+                    let sdy = fy - (cy + 1.2);
+                    let sdist = (sdx * sdx + sdy * sdy).sqrt();
+                    let sw = (lw * 2.6).max(2.4);
+                    let k = ((sdist - r).abs() / (sw * 0.5)).min(1.0);
+                    shadow_cov += (1.0 - k).powf(1.2) * 1.0;
                     if (dist - r).abs() > lw / 2.0 {
                         continue;
                     }
@@ -54,7 +62,8 @@ pub fn render_bgra(size: u32, level: Option<u8>, charging: bool, cfg: &Config) -
             let total = (ss * ss) as f32;
             let tc = (track_cov / total).min(1.0);
             let pc = (prog_cov / total).min(1.0);
-            let mut a = 0.0f32;
+            let shadow_a = (shadow_cov / total * 0.6).min(1.0) * 0.72;
+            let mut a = shadow_a;
             let (mut rr, mut gg, mut bb) = (0.0f32, 0.0f32, 0.0f32);
             let blend = |a_src: f32, sr: f32, sg: f32, sb: f32,
                          a_dst: f32, dr: f32, dg: f32, db: f32| {

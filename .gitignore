@@ -24,3 +24,4 @@ rust/*.png
 rust/_patch*.py
 rust/fix_*.py
 rust/add_icon.py
+rust/*.py

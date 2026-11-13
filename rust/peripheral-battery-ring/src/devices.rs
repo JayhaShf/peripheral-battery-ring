@@ -4,6 +4,7 @@
 use crate::config::log_line;
 use crate::model::{Reading, connection_text};
 use hidapi::{HidApi, HidDevice};
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 
@@ -443,6 +444,8 @@ enum Backend {
     RogMouse { path: CString, report_id: u8, offset: usize, scale: u8 },
     LogiSlot { short: CString, long: CString, index: u8 },
     LogiWired { short: CString, long: CString },
+    GenericHid { path: CString },
+    Atk { path: CString, proto: AtkProto },
 }
 
 #[derive(Clone, Debug)]
@@ -503,6 +506,33 @@ impl Device {
                     None => self.unavailable("有线设备没有应答（可能已拔出）"),
                 }
             }
+            Backend::GenericHid { path } => match generic_read(path) {
+                Some(b) => self.to_reading(b),
+                None => self.unavailable("设备没有上报电量（可能已休眠/不支持标准 HID 电量）"),
+            },
+            Backend::Atk { path, proto } => match atk_query(path, proto) {
+                Some(reply) => match atk_parse(proto, &reply) {
+                    Some((level, wired)) => Reading {
+                        device_id: self.id.clone(),
+                        name: self.name.clone(),
+                        level: Some(level),
+                        status: "discharging".into(),
+                        charging: false,
+                        detail: format!(
+                            "{} · 电量[{}]=0x{:02X}{}",
+                            proto.name,
+                            proto.level_offset,
+                            reply[proto.level_offset],
+                            if wired { " · 有线连接" } else { "" }
+                        ),
+                        connection: self.connection.clone(),
+                        vid_pid: self.vid_pid.clone(),
+                        ..Default::default()
+                    },
+                    None => self.unavailable("ATK 回复无法解析"),
+                },
+                None => self.unavailable("接收器没有应答（设备可能已关机/休眠）"),
+            },
         }
     }
 
@@ -547,6 +577,8 @@ pub fn discover() -> Vec<Device> {
     let mut devices = Vec::new();
     devices.extend(discover_rog(&ifaces));
     devices.extend(discover_logitech(&ifaces));
+    devices.extend(discover_generic(&ifaces));
+    devices.extend(discover_atk(&ifaces));
     devices
 }
 
@@ -658,6 +690,229 @@ fn discover_logitech(ifaces: &[Iface]) -> Vec<Device> {
         }
     }
     devices
+}
+
+// ---------------------------------------------------------------------------
+// ATK / VXE（373B / 3554）2.4G 鼠标
+// ---------------------------------------------------------------------------
+
+const ATK_VID: u16 = 0x373B;
+const VXE_VID: u16 = 0x3554;
+
+#[derive(Clone, Debug)]
+struct AtkProto {
+    name: &'static str,
+    usage_page: u16,
+    report_id: u8,
+    report_len: usize,
+    payload: Vec<u8>,       // 不含 report id
+    level_offset: usize,
+    wired_offset: Option<usize>,
+    expect: Vec<(usize, u8)>,
+}
+
+fn atk_protocols() -> Vec<AtkProto> {
+    vec![
+        AtkProto {
+            name: "ATK/VXE 协议 1",
+            usage_page: 0xFF02,
+            report_id: 0x08,
+            report_len: 17,
+            payload: {
+                let mut v = vec![0u8; 16];
+                v[0] = 0x04;
+                v[15] = 0x49;
+                v
+            },
+            level_offset: 6,
+            wired_offset: Some(7),
+            expect: Vec::new(),
+        },
+        AtkProto {
+            name: "ATK/VXE 协议 2",
+            usage_page: 0xFF05,
+            report_id: 0x08,
+            report_len: 64,
+            payload: vec![0x7D, 0x72, 0x02, 0x00, 0x01, 0x07, 0x01],
+            level_offset: 7,
+            wired_offset: None,
+            expect: vec![(1, 0x72), (5, 0x07)],
+        },
+    ]
+}
+
+fn atk_build_request(proto: &AtkProto) -> Vec<u8> {
+    let mut packet = vec![0u8; proto.report_len];
+    packet[0] = proto.report_id;
+    let take = (proto.report_len - 1).min(proto.payload.len());
+    packet[1..1 + take].copy_from_slice(&proto.payload[..take]);
+    packet
+}
+
+fn atk_parse(proto: &AtkProto, reply: &[u8]) -> Option<(u8, bool)> {
+    if reply.len() <= proto.level_offset {
+        return None;
+    }
+    for (off, val) in &proto.expect {
+        if reply.len() <= *off || reply[*off] != *val {
+            return None;
+        }
+    }
+    let raw = reply[proto.level_offset];
+    if raw > 100 {
+        return None;
+    }
+    let wired = proto
+        .wired_offset
+        .map(|off| reply.len() > off && reply[off] != 0)
+        .unwrap_or(false);
+    Some((raw, wired))
+}
+
+fn atk_query(path: &CString, proto: &AtkProto) -> Option<Vec<u8>> {
+    let mut api = HidApi::new().ok()?;
+    let dev = api
+        .open_path(path.as_c_str())
+        .ok()?;
+    let packet = atk_build_request(proto);
+    for _ in 0..3 {
+        if dev.write(&packet).is_err() {
+            return None;
+        }
+        let mut buf = [0u8; 64];
+        let deadline = Instant::now() + Duration::from_millis(160);
+        while Instant::now() < deadline {
+            if let Ok(n) = dev.read_timeout(&mut buf, 80) {
+                if n > 0 && atk_parse(proto, &buf[..n]).is_some() {
+                    return Some(buf[..n].to_vec());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn discover_atk(ifaces: &[Iface]) -> Vec<Device> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<(u16, u16)> = HashSet::new();
+    for proto in atk_protocols() {
+        for item in ifaces {
+            if item.vid != ATK_VID && item.vid != VXE_VID {
+                continue;
+            }
+            if item.usage_page != proto.usage_page {
+                continue;
+            }
+            if !seen.insert((item.vid, item.pid)) {
+                continue;
+            }
+            let pid = item.pid;
+            let product = item.product.to_lowercase();
+            let name = if product.contains("8k") {
+                "ATK 8K 无线鼠标"
+            } else if product.contains("mouse") {
+                "ATK/VXE 无线鼠标"
+            } else if product.contains("keyboard") {
+                "ATK/VXE 无线键盘"
+            } else {
+                "ATK/VXE 2.4G 设备"
+            };
+            out.push(Device {
+                id: format!("atk:{:04X}:{:04X}", item.vid, pid),
+                name: name.to_string(),
+                connection: "receiver".into(),
+                vid_pid: format!("{:04X}:{:04X}", item.vid, pid),
+                backend: Backend::Atk { path: item.path.clone(), proto: proto.clone() },
+            });
+            break; // 同一协议只取一个接口
+        }
+    }
+    out
+}
+
+/// 标准 HID Battery Strength（usage page 0x06 / usage 0x20）设备。
+/// 很多 2.4G 接收器 / 蓝牙外设用它上报电量；只读，不猜协议。
+fn generic_read(path: &CString) -> Option<BatteryReading> {
+    let dev = open(path)?;
+    // 1) Feature Report：常见 report id 0x06 / 0x05 / 0x01
+    for rid in [0x06u8, 0x05, 0x01] {
+        let mut buf = [0u8; 9];
+        buf[0] = rid;
+        if let Ok(n) = dev.get_feature_report(&mut buf) {
+            for &b in buf[1..n.min(buf.len())].iter() {
+                if (1..=100).contains(&b) {
+                    return Some(BatteryReading {
+                        level: Some(b),
+                        charging: false,
+                        estimated: false,
+                        voltage_mv: None,
+                        detail: format!("标准 HID 电量 · feature 0x{rid:02X} = {b}%"),
+                    });
+                }
+            }
+        }
+    }
+    // 2) Input Report：等一小会儿，取第一个 1..=100 的字节
+    let mut buf = [0u8; 16];
+    for _ in 0..8 {
+        match dev.read_timeout(&mut buf, 120) {
+            Ok(n) if n > 0 => {
+                for &b in buf[..n].iter() {
+                    if (1..=100).contains(&b) {
+                        return Some(BatteryReading {
+                            level: Some(b),
+                            charging: false,
+                            estimated: false,
+                            voltage_mv: None,
+                            detail: format!("标准 HID 电量 · input = {b}%"),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn discover_generic(ifaces: &[Iface]) -> Vec<Device> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut per_pid: std::collections::HashMap<(u16, u16), usize> = std::collections::HashMap::new();
+    for item in ifaces {
+        // 华硕/罗技的厂商协议已由上面的后端处理
+        if item.vid == ASUS_VID || item.vid == LOGITECH_VID {
+            continue;
+        }
+        if !(item.usage_page == 0x06 && item.usage == 0x20) {
+            continue;
+        }
+        if item.product.to_lowercase().contains("aura") {
+            continue;
+        }
+        let key = item.instance_key();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let counter = per_pid.entry((item.vid, item.pid)).or_insert(0);
+        *counter += 1;
+        let suffix = if *counter > 1 { format!("#{}", counter) } else { String::new() };
+        let name = if item.product.trim().is_empty() {
+            format!("2.4G 设备 {:04X}:{:04X}", item.vid, item.pid)
+        } else {
+            item.product.trim().to_string()
+        };
+        let path_low = item.path.to_string_lossy().to_lowercase();
+        let connection = if path_low.contains("bth") { "bluetooth" } else { "receiver" };
+        out.push(Device {
+            id: format!("hid:{:04X}:{:04X}{}", item.vid, item.pid, suffix),
+            name,
+            connection: connection.into(),
+            vid_pid: format!("{:04X}:{:04X}", item.vid, item.pid),
+            backend: Backend::GenericHid { path: item.path.clone() },
+        });
+    }
+    out
 }
 
 pub fn read_all() -> Vec<Reading> {

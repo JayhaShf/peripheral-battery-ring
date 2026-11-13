@@ -21,7 +21,9 @@ Python 版的 Rust 重写：**单个独立 exe**（静态链接 VC 运行库）�
 |---|---|
 | ROG 夜魔X（ROG OMNI 接收器 0B05:1ACE） | ✅ 真机验证（键盘 76%） |
 | 罗技 HID++ 接收器（C539 等）/ 有线直连 | 代码已实现，测试时本机鼠标不在线，未完成 Rust 版真机复测 |
-| ROG 有线直连 / ATK/DARKRIM / 通用 HID / 蓝牙 | ❌ 未移植（Python 版有） |
+| ATK / VXE / VGN 2.4G 鼠标（373B / 3554） | ✅ 真机验证（373B:11D9 8K dongle，80%） |
+| 其它标准 HID Battery Strength 设备 | ✅ 尽力支持（usage 0x06:0x20，feature/input 探测） |
+| ROG 有线直连 / DARKRIM 耳机 | ❌ 未移植（Python 版有） |
 | 任务栏悬浮圆环、托盘充电动画 | ❌ 未移植（主界面充电扫光保留） |
 
 ## 构建
@@ -58,10 +60,17 @@ cargo run
 退出：托盘图标右键 → 退出。开机自启：设置页勾选，会在
 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\外设电量圆环.lnk` 创建快捷方式。
 
+## 界面
+
+- 跟随系统深浅色（可在设置里选「跟随系统 / 深色 / 浅色」），Segoe UI Variable + 微软雅黑
+- 圆角卡片 + DWM 圆角窗口 + 深色标题栏
+- 托盘圆环图标带柔和阴影
+- 主界面单实例：重复点击托盘图标只会激活已有窗口
+
 ## 截图
 
-![Rust 设备页](../docs/19-Rust-设备页.png)
+![Rust 设备页](../docs/22-Rust-设备页-2.4G.png)
 
 ![Rust 设置页](../docs/20-Rust-设置页.png)
 
-![Rust 通知区域](../docs/21-Rust-通知区域图标.png)
+![Rust 通知区域](../docs/23-Rust-托盘-双设备.png)

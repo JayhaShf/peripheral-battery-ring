@@ -40,7 +40,7 @@ pub struct Config {
 fn d_ring_size() -> u32 { 30 }
 fn d_refresh() -> u64 { 5 }
 fn d_true() -> bool { true }
-fn d_theme() -> String { "dark".into() }
+fn d_theme() -> String { "system".into() }
 fn d_charge_color() -> String { "#3b82f6".into() }
 fn d_tray_ring() -> bool { false }
 fn d_colors() -> Vec<ColorLevel> {

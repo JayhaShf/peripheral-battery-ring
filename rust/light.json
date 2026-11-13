@@ -1,0 +1,37 @@
+{
+  "ring_size": 36,
+  "refresh_seconds": 30,
+  "device_hidden": [],
+  "show_tray_icon": true,
+  "animate": true,
+  "color_levels": [
+    {
+      "min": 60,
+      "color": "#22c55e"
+    },
+    {
+      "min": 20,
+      "color": "#f59e0b"
+    },
+    {
+      "min": 0,
+      "color": "#ef4444"
+    }
+  ],
+  "charging_color": "#3b82f6",
+  "autostart": true,
+  "theme": "light",
+  "taskbar_ring_enabled": false,
+  "device_aliases": {},
+  "device_order": [],
+  "low_battery_warn": 20,
+  "offset_x": 0,
+  "offset_y": 0,
+  "position_mode": "taskbar",
+  "show_names": false,
+  "style": "B",
+  "window_height": 800,
+  "window_width": 560,
+  "window_x": 558,
+  "window_y": 169
+}
