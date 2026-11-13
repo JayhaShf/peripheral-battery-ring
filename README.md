@@ -7,6 +7,19 @@
 - 已在真机验证：ROG 夜魔X（Azoth X）+ 罗技 G PRO Wireless
 - 通知区域图标样式 + 主程序界面见下方**实机截图**
 
+## Rust 版（独立 exe）
+
+同一套功能用 Rust 重写了一份，**不需要 Python 运行时**，单个 exe 即跑：
+
+- 下载：GitHub Releases（`Rust v0.2.0` 的 `PeripheralBatteryRing.exe`）
+- 本地构建产物：`dist\PeripheralBatteryRing.exe`（约 5 MB，静态链接 VC 运行库）
+- 源码：`rust/peripheral-battery-ring/`，构建说明见 [rust/README.md](rust/README.md)
+- 已实现：通知区域每设备圆环 + tooltip + 右键菜单、egui 主界面（设备/设置/关于、颜色自定义）、
+  配置放 exe 目录、单实例、`Ctrl+Alt+B`、开机自启；ROG OMNI 真机验证
+- 未移植：任务栏悬浮圆环、托盘充电动画、通用 HID/ATK/DARKRIM 兜底、ROG 有线直连（Python 版有）
+
+![Rust 主界面](docs/19-Rust-设备页.png)
+
 ## 实机截图
 
 **主界面 · 设备页**（ROG 夜魔X 62%、罗技 G PRO ≈93%）

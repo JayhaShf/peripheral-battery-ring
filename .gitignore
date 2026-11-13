@@ -1,5 +1,6 @@
 # 开发/参考/临时产物（不属于交付）
 _ref/
+_tmp/
 __pycache__/
 *.py[cod]
 *.bmp
@@ -13,4 +14,13 @@ scripts/install-manifest.json
 # 编辑器
 .vscode/
 .idea/
-*.swp_tmp/
+*.swp
+
+# Rust 构建产物 / 本地分发包 / 调试文件
+**/target/
+dist/
+rust/*.txt
+rust/*.png
+rust/_patch*.py
+rust/fix_*.py
+rust/add_icon.py
